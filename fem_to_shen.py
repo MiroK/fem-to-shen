@@ -1,5 +1,6 @@
 from numpy.polynomial.legendre import legval
 from dolfin import mpi_comm_world, Vector
+from scipy.sparse import diags
 from scipy.linalg import eigh
 from block.object_pool import vec_pool
 from block.block_base import block_base
@@ -80,10 +81,48 @@ def fractional_laplace(V, s, bcs=[]):
         A = assemble(inner(grad(u), grad(v))*dx)
         M = assemble(inner(u, v)*dx)
 
+        print A.array()
+        print M.array()
+
     A = A.array()
     M = M.array()
 
     lmbda, U = eigh(A, M)
+    L = np.diag(lmbda**s)
+    U = M.dot(U)
+    Ut = U.T
+
+    lmbda, U = eigh(A, M)
+    L = np.diag(lmbda**s)
+    U = M.dot(U)
+    Ut = U.T
+
+    B = np.array(U.dot(L.dot(Ut)))
+
+    return numpy_op(B)
+    B = np.array(U.dot(L.dot(Ut)))
+
+    return numpy_op(B)
+
+
+def fractional_laplace_shen(n, s):
+    '''A is I, M is tridiag'''
+    weight = lambda k: 1/sqrt(4*k + 6)
+    # The matrix is tridiagonal and symmetric
+    # Main
+    main_diag = np.array([weight(i)**2*((2./(2*i+1) + 2./(2*(i+2)+1)))
+                          for i in range(n)])
+    # Upper
+    up_diag = np.array([-weight(i)*weight(i+2)*(2./(2*(i+2)+1))
+                        for i in range(n-2)])
+   
+    if n < 3:
+        M = diags(main_diag, 0)
+    else:
+        M = diags([up_diag, main_diag, up_diag], [-2, 0, 2])
+    M = M.todense()
+
+    lmbda, U = eigh(np.eye(n), M)
     L = np.diag(lmbda**s)
     U = M.dot(U)
     Ut = U.T
@@ -135,47 +174,69 @@ if __name__ == '__main__':
     from dolfin import *
     # So how many m(legendre functions) to get the approximation of fractional
     # Laplacian right?
-    ncells = 20
+    ncells = 256
     s = 0.5
 
     mesh = IntervalMesh(ncells, -1, 1)
     # FEM space
     V = FunctionSpace(mesh, 'CG', 1)
-    fh = interpolate(Expression('(1-x[0])*(1+x[0])', degree=2), V)
+    bcs=DirichletBC(V, Constant(0), 'on_boundary')
+    fh = interpolate(Expression('sin(k*pi*x[0])', degree=2, k=2), V)
+    # fh = Function(V)
+    # fh.vector().set_local(np.random.rand(fh.vector().local_size()))
+    # bcs.apply(fh.vector())
 
     # Applying the laplacian in FEM 
-    Dh = fractional_laplace(V, s=s, 
-                            bcs=DirichletBC(V, Constant(0), 'on_boundary'))
+    Dh = fractional_laplace(V, s=s, bcs=bcs)
     d_fh = Function(V, Dh*fh.vector())
 
-    nspectral = 10
-    # Spactral space
-    fs = [as_expression(shen(k), k+1, cell=interval) for k in range(nspectral)]
+    for nspectral in range(2, 10, 2):
+        # Spectral space
+        fs = [as_expression(shen(k), k+1, cell=interval) for k in range(nspectral)]
 
-    W = VectorFunctionSpace(mesh, 'R', 0, dim=len(fs))
-    ps, qs = TrialFunction(W), TestFunction(W)
-    p = sum([ui*fi for ui, fi in zip(ps, fs)])
-    q = sum([vi*fi for vi, fi in zip(qs, fs)])
+        W = VectorFunctionSpace(mesh, 'R', 0, dim=len(fs))
+        ps, qs = TrialFunction(W), TestFunction(W)
+        p = sum([ui*fi for ui, fi in zip(ps, fs)])
+        q = sum([vi*fi for vi, fi in zip(qs, fs)])
 
-    # Applying the laplacian in spect
-    T = Transformation(V, (p, q))
-    to_W = T.to_W()
-    to_V = T.to_V()
+        # Applying the laplacian in spect
+        T = Transformation(V, (p, q))
+        toW = T.to_W()
+        toV = T.to_V()
 
-    d_N = fractional_laplace((p, q), s=s)
-    y = toV*d_N*to_W*fh.vector()
+        d_N = fractional_laplace_shen(W.dim(), s=s)
+        xx = d_N*toW*fh.vector()
+        y = toV*xx
+        fy = Function(V, y)
 
-    FN = to_W*fh.vector()
-    FN = FN.array()
-    fN = as_expression(lambda y: sum(ci*fi(y) for ci, fi in zip(FN, fs)),
-                       degree=len(FN)+2)
+        FN = toW*fh.vector()
+        FN = FN.array()
+        fN = as_expression(lambda y: sum(ci*fi(y) for ci, fi in zip(FN, fs)),
+                           degree=len(FN)+2)
+        g = as_expression(lambda y: sum(ci*fi(y) for ci, fi in zip(xx, fs)),
+                          degree=len(xx)+2)
 
-    x = np.linspace(-1, 1, 100)
-    plt.figure()
-    plt.plot(x, map(fh, x), label='f')
-    plt.plot(x, map(d_fh, x), label='Df')
-    plt.plot(x, map(fN, x))
+        # print y.array()
+        print nspectral
+        # 
+        print 'norm(fh-fN)', sqrt(assemble(inner(fh-fN, fh-fN)*dx))
+        print 'norm(fh)', sqrt(assemble(inner(fh, fh)*dx)),
+        print 'norm(fN)', sqrt(assemble(inner(fN, fN)*dx(domain=mesh)))
 
-    plt.legend(loc='best')
+        print 'norm(dfh-dfN)', sqrt(assemble(inner(d_fh-g, d_fh-g)*dx))
+        print 'norm(dfh)', sqrt(assemble(inner(d_fh, d_fh)*dx)),
+        print 'norm(dfN)', sqrt(assemble(inner(g, g)*dx(domain=mesh)))
+
+        print
+
+        x = np.linspace(-1, 1, 100)
+        # plt.figure()
+        # plt.plot(x, map(fh, x), label='fh')
+        # plt.plot(x, map(fN, x), label='fN')
+        # plt.legend(loc='best')
+
+        plt.figure()
+        plt.plot(x, map(d_fh, x), label='$-\Delta^{0.5} fh, %d$' % nspectral)
+        plt.plot(x, map(fy, x), label='$T(-\Delta^{0.5} fN)T$')
+        plt.legend(loc='best')
     plt.show()
-    
