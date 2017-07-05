@@ -1,11 +1,10 @@
 from numpy.polynomial.legendre import legval
-from dolfin import mpi_comm_world, Vector
 from scipy.sparse import diags
 from scipy.linalg import eigh
 from block.object_pool import vec_pool
 from block.block_base import block_base
 from block import block_transpose
-from math import sqrt
+from dolfin import *
 import numpy as np
 
 COMM = mpi_comm_world()
@@ -104,9 +103,8 @@ def fractional_laplace(V, s, bcs=[]):
 
     return numpy_op(B)
 
-
-def fractional_laplace_shen(n, s):
-    '''A is I, M is tridiag'''
+def mass_matrix_shen(n):
+    '''M'''
     weight = lambda k: 1/sqrt(4*k + 6)
     # The matrix is tridiagonal and symmetric
     # Main
@@ -120,11 +118,16 @@ def fractional_laplace_shen(n, s):
         M = diags(main_diag, 0)
     else:
         M = diags([up_diag, main_diag, up_diag], [-2, 0, 2])
+    return M
+
+def fractional_laplace_shen(n, s):
+    '''A is I, M is tridiag'''
+    M = mass_matrix_shen(n)
     M = M.todense()
 
-    lmbda, U = eigh(np.eye(n), M)
-    L = np.diag(lmbda**s)
-    U = M.dot(U)
+    lmbda, U = eigh(M)
+    L = np.diag(lmbda**(-s))
+    U = U
     Ut = U.T
 
     B = np.array(U.dot(L.dot(Ut)))
@@ -171,7 +174,6 @@ class Transformation(object):
 
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
-    from dolfin import *
     # So how many m(legendre functions) to get the approximation of fractional
     # Laplacian right?
     ncells = 256
@@ -181,16 +183,19 @@ if __name__ == '__main__':
     # FEM space
     V = FunctionSpace(mesh, 'CG', 1)
     bcs=DirichletBC(V, Constant(0), 'on_boundary')
-    fh = interpolate(Expression('sin(k*pi*x[0])', degree=2, k=2), V)
-    # fh = Function(V)
-    # fh.vector().set_local(np.random.rand(fh.vector().local_size()))
-    # bcs.apply(fh.vector())
+    fh = interpolate(Expression('sin(k*pi*x[0])', degree=2, k=4), V)
 
     # Applying the laplacian in FEM 
     Dh = fractional_laplace(V, s=s, bcs=bcs)
-    d_fh = Function(V, Dh*fh.vector())
+    u, v = TrialFunction(V), TestFunction(V)
+    M = assemble(inner(u, v)*dx)
 
-    for nspectral in range(2, 10, 2):
+    dfh = Dh*fh.vector()
+
+    d_fh = Function(V)
+    solve(M, d_fh.vector(), dfh)
+
+    for nspectral in range(2, 20, 2):
         # Spectral space
         fs = [as_expression(shen(k), k+1, cell=interval) for k in range(nspectral)]
 
@@ -216,27 +221,22 @@ if __name__ == '__main__':
         g = as_expression(lambda y: sum(ci*fi(y) for ci, fi in zip(xx, fs)),
                           degree=len(xx)+2)
 
-        # print y.array()
-        print nspectral
-        # 
+        # Monitors
+        print 'dim(Spectral)=%d' % V.dim(), 'dim(FEM)=%d' % W.dim()
         print 'norm(fh-fN)', sqrt(assemble(inner(fh-fN, fh-fN)*dx))
-        print 'norm(fh)', sqrt(assemble(inner(fh, fh)*dx)),
-        print 'norm(fN)', sqrt(assemble(inner(fN, fN)*dx(domain=mesh)))
-
         print 'norm(dfh-dfN)', sqrt(assemble(inner(d_fh-g, d_fh-g)*dx))
-        print 'norm(dfh)', sqrt(assemble(inner(d_fh, d_fh)*dx)),
-        print 'norm(dfN)', sqrt(assemble(inner(g, g)*dx(domain=mesh)))
-
         print
 
-        x = np.linspace(-1, 1, 100)
-        # plt.figure()
-        # plt.plot(x, map(fh, x), label='fh')
-        # plt.plot(x, map(fN, x), label='fN')
-        # plt.legend(loc='best')
+    x = np.linspace(-1, 1, 100)
 
-        plt.figure()
-        plt.plot(x, map(d_fh, x), label='$-\Delta^{0.5} fh, %d$' % nspectral)
-        plt.plot(x, map(fy, x), label='$T(-\Delta^{0.5} fN)T$')
-        plt.legend(loc='best')
+    plt.figure()
+    plt.plot(x, map(fh, x), label='fh')
+    plt.plot(x, map(fN, x), label='fN')
+    plt.legend(loc='best')
+
+    plt.figure()
+    plt.plot(x, map(d_fh, x), label='$-\Delta^{0.5} fh, %d$' % nspectral)
+    plt.plot(x, map(fy, x), label='$T(-\Delta^{0.5} fN)T$')
+    plt.legend(loc='best')
+
     plt.show()
